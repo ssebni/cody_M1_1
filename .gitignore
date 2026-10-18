@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+data/*.csv
+results/cleaned_posts.csv
+.env
+*.token
