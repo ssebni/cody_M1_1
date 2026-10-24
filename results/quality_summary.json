@@ -1,6 +1,6 @@
 {
-  "rows": 81,
-  "valid": 79,
+  "rows": 105,
+  "valid": 103,
   "columns": [
     "post_id",
     "timestamp",
@@ -27,11 +27,15 @@
     "status": 0,
     "collected_at": 0
   },
-  "view_total": 1534657,
-  "view_median": 1052.0,
-  "top1_share_pct": 47.677428897792794,
-  "top5_share_pct": 89.0250394713607,
-  "iqr_upper": 5929.5,
-  "iqr_high_count": 11,
-  "valid_sample_requirement_met": false
+  "collection_start": "2026-10-24T14:02:25.154189+09:00",
+  "collection_end": "2026-10-24T14:03:49.265061+09:00",
+  "post_start": "2026-10-02T17:02:51+09:00",
+  "post_end": "2026-10-24T13:11:50+09:00",
+  "view_total": 1871664,
+  "view_median": 2829.0,
+  "top1_share_pct": 39.129459133690666,
+  "top5_share_pct": 75.49025893536447,
+  "iqr_upper": 14470.5,
+  "iqr_high_count": 12,
+  "valid_sample_requirement_met": true
 }

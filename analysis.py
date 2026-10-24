@@ -15,6 +15,7 @@ METRICS = ['views', 'likes', 'replies', 'reposts', 'quotes']
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=Path, default=ROOT / 'data/threads_insights.csv')
+    parser.add_argument('--baseline', type=Path, help='Optional previous CSV snapshot for comparison')
     args = parser.parse_args()
     raw = pd.read_csv(args.input, dtype=str, encoding='utf-8-sig')
     required = ['post_id', 'timestamp', 'text', 'media_type', *METRICS, 'status', 'collected_at']
@@ -101,6 +102,8 @@ def main():
     q1, q3 = clean.views.quantile([.25, .75])
     upper = q3 + 1.5*(q3-q1)
     summary = {'rows':len(d), 'valid':len(clean), 'columns':list(raw), 'missing':raw.isna().sum().to_dict(),
+               'collection_start':d.collected_at.min().isoformat(), 'collection_end':d.collected_at.max().isoformat(),
+               'post_start':d.timestamp.min().isoformat(), 'post_end':d.timestamp.max().isoformat(),
                'view_total':int(clean.views.sum()), 'view_median':float(clean.views.median()),
                'top1_share_pct':float(cumulative.iloc[0]), 'top5_share_pct':float(cumulative.iloc[min(4,len(clean)-1)]),
                'iqr_upper':float(upper), 'iqr_high_count':int((clean.views > upper).sum()),
@@ -108,15 +111,43 @@ def main():
     (results / 'quality_summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
     quality_rows = '\n'.join(f'| `{c}` | {int(raw[c].isna().sum())} |' for c in required)
     media_rows = '\n'.join(f'| {k} | {int(v.n)} | {v.median_views:,.0f} | {v.mean_views:,.0f} | {v.median_rate:.2f}% |' for k,v in groups.iterrows())
+    media_observation = '; '.join(f'{k} {int(v.n)}개: {v.median_views:,.0f}회' for k,v in groups.iterrows())
     nonempty = changes.dropna()
     max_day = nonempty.idxmax().strftime('%m-%d') if len(nonempty) else '산출 불가'
     max_change = f'{nonempty.max():,.1f}%' if len(nonempty) else '산출 불가'
+    incomplete = d.loc[~valid]
+    incomplete_types = incomplete.media_type.value_counts().to_dict()
+    comparison_text = ''
+    if args.baseline:
+        before = pd.read_csv(args.baseline, dtype=str, encoding='utf-8-sig')
+        if before.post_id.isna().any() or before.post_id.duplicated().any():
+            raise ValueError('Baseline contains missing/duplicate IDs')
+        before_metrics = before[METRICS].apply(pd.to_numeric, errors='raise')
+        prior = before.loc[before.status.eq('success') & before_metrics.notna().all(axis=1)].copy()
+        prior['views'] = pd.to_numeric(prior.views)
+        common_ids = set(prior.post_id) & set(clean.post_id)
+        previous_views = prior.loc[prior.post_id.isin(common_ids), 'views'].sum()
+        current_views = clean.loc[clean.post_id.isin(common_ids), 'views'].sum()
+        added_valid = clean.loc[~clean.post_id.isin(before.post_id)]
+        comparison = {'previous_rows':len(before), 'previous_valid':len(prior),
+                      'current_rows':len(d), 'current_valid':len(clean),
+                      'new_unique_posts':len(set(d.post_id)-set(before.post_id)),
+                      'new_valid_posts':len(added_valid), 'common_valid_posts':len(common_ids),
+                      'common_previous_views':int(previous_views), 'common_current_views':int(current_views),
+                      'new_valid_views':int(added_valid.views.sum())}
+        (results / 'snapshot_comparison.json').write_text(json.dumps(comparison, indent=2), encoding='utf-8')
+        comparison_text = f'''### 이전 스냅샷과 비교
+- 이전 게시물 {len(before)}개·유효 {len(prior)}개에서 현재 게시물 {len(d)}개·유효 {len(clean)}개로 갱신했다.
+- 이전 파일에 없던 신규 유효 게시물은 {len(added_valid)}개다.
+- 공통 유효 게시물 {len(common_ids)}개의 누적 조회수는 {int(previous_views):,}회에서 {int(current_views):,}회로 변했다.
+- 신규 유효 게시물 조회수 합계는 {int(added_valid.views.sum()):,}회다. 전체 조회수의 차이에는 기존 게시물 누적 증가와 새 게시물 추가가 섞여 있어 분리해 제시했다.
+'''
     report = f'''# Threads Insight M1-1 분석 리포트
 
 ## 1. 분석 주제 및 선정 이유
 Threads 게시 날짜별 성과 패턴과 콘텐츠 유형별 차이를 분석한다. 관심 있는 실제 게시물 데이터로 조회수의 집중도와 반응 특성을 확인하고 다음 콘텐츠 실험의 근거를 마련한다.
 
-**진행 상태: {'유효 표본 100개 요건 충족' if len(clean)>=100 else '1차 분석, 필수 표본 요건 미충족'}.** 전체 {len(d)}개, 유효 인사이트 {len(clean)}개다. 데이터 포인트는 성과 지표가 완전한 고유 게시물 1개로 정의한다. 현재 최소 {max(0,100-len(clean))}개의 유효 게시물을 추가 확보해야 한다. 시각화용 일별 집계의 관측 수와 고유 게시물 수는 구분한다.
+**갱신일: {d.collected_at.max():%Y-%m-%d}, 진행 상태: {'유효 표본 100개 요건 충족' if len(clean)>=100 else '필수 표본 요건 미충족'}.** 전체 {len(d)}개, 유효 인사이트 {len(clean)}개다. 데이터 포인트는 성과 지표가 완전한 고유 게시물 1개로 정의한다. {'추가 표본 확보 요건을 충족했다.' if len(clean)>=100 else f'현재 최소 {100-len(clean)}개의 유효 게시물을 추가 확보해야 한다.'} 시각화용 일별 집계의 관측 수와 고유 게시물 수는 구분한다.
 
 ## 2. 분석 질문
 1. 게시 날짜별 조회수 중앙값은 어떻게 변하며, 3일 이동평균에서 어떤 패턴이 보이는가?
@@ -126,7 +157,7 @@ Threads 게시 날짜별 성과 패턴과 콘텐츠 유형별 차이를 분석�
 
 ## 3. 데이터 설명 및 품질
 - 출처: 분석자 본인의 Threads 계정. Threads API를 사용해 게시물과 인사이트를 수집한 CSV다.
-- 수집 대상 범위: 계정 생성 시점부터 2026년 10월 n일까지이며, n은 다음 업데이트 시 확정한다. 아래 게시 기간은 현재 CSV에서 확인한 실제 관측 범위다. 계정 생성일 및 수집의 완전성은 별도로 확인해야 한다.
+- 수집 대상 범위: 본인 계정에서 API가 반환하는 게시물 전체를 페이지네이션으로 조회했다. 이번 수집 종료일은 {d.collected_at.max():%Y년 %m월 %d일}이다. 아래 게시 기간은 현재 CSV의 실제 관측 범위이며, 계정 생성일 또는 삭제·비공개 게시물까지의 완전성을 뜻하지 않는다.
 - 원본: `data/threads_insights.csv`. 원본 파일은 보존하고 분석용 사본을 사용한다.
 - 게시 기간(KST): {d.timestamp.min():%Y-%m-%d %H:%M:%S} ~ {d.timestamp.max():%Y-%m-%d %H:%M:%S}.
 - 수집 기간(KST): {d.collected_at.min():%Y-%m-%d %H:%M:%S} ~ {d.collected_at.max():%Y-%m-%d %H:%M:%S}.
@@ -138,14 +169,14 @@ Threads 게시 날짜별 성과 패턴과 콘텐츠 유형별 차이를 분석�
 |---|---:|
 {quality_rows}
 
-현재 `empty` 2행은 모두 `REPOST_FACADE` 유형이다. 유형별 미제공 여부는 추가 확인이 필요하다. 날짜가 없는 구간도 실제 미게시인지 수집 누락인지 확인되지 않았으므로 0으로 채우지 않고 결측 구간으로 표시한다. 첫날·마지막 날은 완전한 일 단위 수집 범위가 아닐 수 있어 경계일로 표시한다.
+현재 성과 분석에서 제외한 행은 {len(incomplete)}개이며 유형별 건수는 {incomplete_types}다. 상태별 전체 건수는 {d.status.value_counts().to_dict()}다. 유형별 미제공 여부는 추가 확인이 필요하다. 날짜가 없는 구간도 실제 미게시인지 수집 누락인지 확인되지 않았으므로 0으로 채우지 않고 결측 구간으로 표시한다. 첫날·마지막 날은 완전한 일 단위 수집 범위가 아닐 수 있어 경계일로 표시한다.
 
 조회수 IQR 상한은 {upper:,.1f}회이며 초과 게시물은 {int((clean.views>upper).sum())}개다. 실제 확산 가능성이 있어 제거하거나 상한으로 치환하지 않았다. 재게시·인용은 0이 많아 IQR=0일 수 있으므로 이 기준으로 양수 값을 일괄 제거하지 않는다.
 
 ## 4. 시계열 분석 방법
-이번 데이터는 **게시 날짜가 다른 게시물의 누적 성과를 한 번 수집한 스냅샷**이다. 시간 축은 게시일이며 실제 일별 신규 조회수나 같은 게시물의 성장 곡선이 아니다. 원본 81행을 81일의 일별 시계열로 간주하지 않는다.
+이번 데이터는 **게시 날짜가 다른 게시물의 누적 성과를 한 번 수집한 스냅샷**이다. 시간 축은 게시일이며 실제 일별 신규 조회수나 같은 게시물의 성장 곡선이 아니다. 원본 {len(d)}행을 {len(d)}일의 일별 시계열로 간주하지 않는다.
 
-KST의 달력 날짜를 집계 단위로 사용했다. 약 2주 범위에서 일별 게시 집단의 차이를 확인하기 위한 선택이다. 주별·월별 집계로는 비교 구간이 너무 적다.
+KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일 범위에서 일별 게시 집단의 차이를 확인하기 위한 선택이다. 유효 게시물이 있는 날짜는 {int(daily.posts.notna().sum())}일이다. 주별·월별 집계로는 비교 구간이 너무 적다.
 
 1. **일별 구간 통계:** 게시 날짜별 게시물 수와 누적 조회수 중앙값을 계산한다. 극단값의 영향을 줄이기 위해 중앙값을 대표 지표로 사용한다.
 2. **3일 이동평균:** 일별 중앙값에 연속 3개 달력일의 산술평균을 적용한다. 3일 중 값이 하나라도 없으면 계산하지 않아 누락 구간을 건너 연결하지 않는다.
@@ -182,32 +213,31 @@ KST의 달력 날짜를 집계 단위로 사용했다. 약 2주 범위에서 일
 ## 6. 인사이트: 관찰·해석·행동
 
 1. **조회수가 소수 게시물에 집중된다.** 관찰: 그래프 3에서 상위 5개가 전체 조회수의 {cumulative.iloc[min(4,len(clean)-1)]:.1f}%다. 해석: 일부 확산 사례가 전체 평균을 끌어올릴 가능성이 크다. 행동: 성과 기준은 중앙값과 집중도를 함께 보고, 상위 사례의 본문·주제를 별도로 검토한다.
-2. **콘텐츠 유형의 조회수 중앙값에 차이가 있다.** 관찰: 그래프 4와 표에서 유형별 중앙값과 표본 수를 확인할 수 있으며, 현재 이미지 13개는 2,185회, 텍스트 61개는 1,215회, 캐러셀 5개는 355회다. 해석: 유형 차이 외에 주제와 게시 경과 시간의 영향일 수 있다. 행동: 같은 주제·비슷한 관측 시간을 맞춘 후 유형 차이를 재검토한다. 이 문장의 현재 기준 수치는 표본 갱신 시 표와 대조해 수정한다.
+2. **콘텐츠 유형의 조회수 중앙값에 차이가 있다.** 관찰: 그래프 4와 표의 유형별 중앙값·표본 수는 {media_observation}다. 해석: 유형 차이 외에 주제와 게시 경과 시간의 영향일 수 있다. 행동: 같은 주제·비슷한 관측 시간을 맞춘 후 유형 차이를 재검토한다.
 3. **날짜별 차이를 시간에 따른 성장으로 단정할 수 없다.** 관찰: 그래프 2에서 가장 큰 증가율은 {max_day}의 {max_change}이고, 유효 게시물의 관측 경과 시간은 {clean.age_hours.min():.1f}~{clean.age_hours.max():.1f}시간이다. 해석: 실제 추세 외에 서로 다른 게시 집단과 누적 관측 시간이 영향을 준다. 행동: 게시 후 24시간·48시간 등 고정 시점에 추가 수집해 비교한다. 기존 게시물의 과거 24시간 값은 현재 값으로 복원하지 않는다.
 
 ## 7. 결론·한계 및 업데이트 계획
-현재 데이터로 기초 품질 점검, 시계열 기법 3가지와 시각화 4개를 수행했다. 대표 성과는 중앙값으로 보고, 확산 사례와 보통 게시물을 나누어 검토하는 것이 적절하다. 그러나 표본 요건을 충족하고 최종 갱신을 마치기 전에는 과제 전체 완료로 표시하지 않는다.
+현재 데이터로 기초 품질 점검, 시계열 기법 3가지와 시각화 4개를 수행했다. 대표 성과는 중앙값으로 보고, 확산 사례와 보통 게시물을 나누어 검토하는 것이 적절하다. {'유효 게시물 100개 이상이라는 수량 요건도 충족했다.' if len(clean)>=100 else '유효 게시물 100개 이상이라는 수량 요건은 아직 미충족이다.'}
 
-한계는 유효 표본 100개 미달 여부, 약 2주의 짧은 범위, 유형별 불균형, 단일 수집 스냅샷, 게시 경과 시간 차이, 외부 변수 미반영이다. 100개 게시물이 되어도 독립적인 100일 시계열이 되는 것은 아니다. 충분한 날짜 범위와 고정 관측 시점 확보가 추가로 필요하다.
+한계는 {len(dates)}개 달력일의 짧은 범위, 유형별 불균형, 단일 수집 스냅샷, 게시 경과 시간 차이, 외부 변수 미반영이다. 100개 게시물이 되어도 독립적인 100일 시계열이 되는 것은 아니다. 충분한 날짜 범위와 고정 관측 시점 확보가 추가로 필요하다.
 
-추가 수집 후 고유 ID 중복을 조정하고 완전한 인사이트가 있는 게시물이 100개 이상인지 확인한다. 같은 게시물의 반복 측정은 별도 스냅샷으로 관리하며 고유 표본을 늘려 세지 않는다. 코드를 다시 실행해 통계·그래프·본 문서를 갱신하고 관찰과 가설을 재검토한다. 현재 버전의 코드·리포트·시각화는 GitHub 저장소에 보관한다. 원본 CSV는 포함하지 않는다.
+이번에는 `collect_threads.py`로 일회 수집한 뒤 고유 ID 중복과 지표 완전성을 확인하고 통계·그래프·문서를 갱신했다. 같은 게시물의 반복 측정은 신규 고유 표본으로 세지 않았다. 자동·예약 수집은 활성화하지 않았다. 현재 버전의 코드·리포트·시각화는 GitHub 저장소에 보관하며 원본 CSV는 포함하지 않는다.
+
+{comparison_text}
 
 ## 8. AI 사용 로그
 | 사용 작업 | 사용 이유 | 수행한 검증 |
 |---|---|---|
-| CSV 구조·결측·형식 점검 및 통계 계산 코드 작성 | 반복 점검 자동화 | 원본 81행·고유 ID 수·success 79행 대조, 지표별 비수치·음수·시간 선후 관계 확인 |
+| CSV 구조·결측·형식 점검 및 통계 계산 코드 작성 | 반복 점검 자동화 | 원본 {len(d)}행·고유 ID 수·유효 {len(clean)}행 대조, 지표별 비수치·음수·시간 선후 관계 확인 |
+| Threads API 일회 수집 및 갱신 | 최신 표본 확보와 수량 요건 확인 | 페이지네이션 종료 확인, 중복 ID·상태별 건수 확인, 인증 정보와 원문 CSV의 Git 제외 확인 |
 | 시계열 집계 및 시각화 코드 작성 | 집계 방식과 그래프 대안 검토 | 누락 날짜를 NA로 유지, 3일 이동평균의 최소 관측 수와 변화율의 결측 처리 확인 |
 | 인사이트 초안 및 보고서 구성 | 수치와 설명을 일관되게 정리 | 누적 스냅샷과 일별 증가량을 구분하고 관찰·해석을 분리 |
 
 위 작업은 AI 지원으로 작성했다. 작성자가 각 그래프와 수치를 이해하고 설명하는 학습 검증은 별도로 필요하며, 본 보고서는 그 검증까지 완료했다고 주장하지 않는다.
 
 ## 9. 재현 및 출처·이용 조건
-실행 방법과 라이브러리 버전은 `README.md`, `requirements.txt`를 참고한다. 본인 Threads 계정의 데이터를 Threads API로 수집했으며, 토큰 등 인증 정보는 공개하지 않는다. 게시물 원문 CSV와 행 단위 파생 데이터는 GitHub 공개 대상에서 제외한다. 과제에서 데이터 대신 수집 방법 문서를 허용하므로 README에 출처·방법·범위·입력 스키마를 기록하고, 코드·집계 결과·리포트·그래프를 공개 대상으로 구성한다. 원본 비공개 상태에서 실행을 재현하려면 같은 스키마의 로컬 CSV를 별도로 준비해야 한다. API 세부 권한과 데이터 재배포 라이선스는 확인하지 않았으며, 이 문서는 재배포 권한을 부여하지 않는다. 수집 종료일 n은 최종 업데이트 시 실제 날짜로 확정한다.
+실행 방법과 라이브러리 버전은 `README.md`, `requirements.txt`를 참고한다. 본인 Threads 계정의 데이터를 Threads API로 수집했으며, 토큰 등 인증 정보는 공개하지 않는다. 게시물 원문 CSV와 행 단위 파생 데이터는 GitHub 공개 대상에서 제외한다. 과제에서 데이터 대신 수집 방법 문서를 허용하므로 README와 `collect_threads.py`에 출처·방법·범위·입력 스키마를 기록하고, 코드·집계 결과·리포트·그래프를 공개 대상으로 구성한다. 원본 비공개 상태에서 실행을 재현하려면 같은 스키마의 로컬 CSV 또는 본인 계정의 API 인증을 별도로 준비해야 한다. 데이터 재배포 라이선스는 부여하지 않는다. 수집 종료일은 {d.collected_at.max():%Y-%m-%d}로 확정했다.
 '''
-    # Keep future runs free of stale example values in the second insight.
-    dynamic = '; '.join(f'{k} {int(v.n)}개: {v.median_views:,.0f}회' for k,v in groups.iterrows())
-    report = report.replace('현재 이미지 13개는 2,185회, 텍스트 61개는 1,215회, 캐러셀 5개는 355회다.', dynamic+'다.')
-    report = report.replace(' 이 문장의 현재 기준 수치는 표본 갱신 시 표와 대조해 수정한다.', '')
     (ROOT / 'REPORT.md').write_text(report, encoding='utf-8')
     print(json.dumps(summary, ensure_ascii=True))
 
