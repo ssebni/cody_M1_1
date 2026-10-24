@@ -2,6 +2,7 @@
 __pycache__/
 data/*.csv
 data/*.csv.tmp
+data/follower_history.json
 results/cleaned_posts.csv
 .env
 *.token

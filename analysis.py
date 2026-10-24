@@ -16,6 +16,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--input', type=Path, default=ROOT / 'data/threads_insights.csv')
     parser.add_argument('--baseline', type=Path, help='Optional previous CSV snapshot for comparison')
+    parser.add_argument('--followers', type=Path, default=ROOT / 'data/follower_history.json',
+                        help='Verified daily follower totals exported from Threads account insights')
     args = parser.parse_args()
     raw = pd.read_csv(args.input, dtype=str, encoding='utf-8-sig')
     required = ['post_id', 'timestamp', 'text', 'media_type', *METRICS, 'status', 'collected_at']
@@ -44,14 +46,27 @@ def main():
     clean['interactions'] = clean[METRICS[1:]].sum(axis=1)
     clean['interaction_rate_pct'] = clean.interactions / clean.views * 100
     clean['date'] = clean.timestamp.dt.normalize()
-    # Missing days remain NA: no evidence that a missing date means no posts.
     dates = pd.date_range(d.timestamp.min().normalize(), d.timestamp.max().normalize(), freq='D')
-    daily = clean.groupby('date').agg(posts=('post_id', 'size'), median_views=('views', 'median'),
-                                      total_views=('views', 'sum')).reindex(dates)
-    # Require 3 populated consecutive calendar days; never bridge unknown gaps.
-    daily['median_views_ma3'] = daily.median_views.rolling(3, min_periods=3).mean()
-    daily['median_views_change_pct'] = daily.median_views.pct_change(fill_method=None) * 100
+    # Count original posts even if their insights are unavailable. Exclude reshare facades.
+    uploads = d.loc[d.media_type.ne('REPOST_FACADE')].copy()
+    uploads['date'] = uploads.timestamp.dt.normalize()
+    daily = uploads.groupby('date').size().reindex(dates, fill_value=0).to_frame('uploads')
     daily['partial_boundary_day'] = (daily.index == dates[0]) | (daily.index == dates[-1])
+    history = json.loads(args.followers.read_text(encoding='utf-8-sig'))
+    if history.get('source') != 'threads_account_insights_ui':
+        raise ValueError('Expected verified account insights UI follower history')
+    follower_rows = history.get('items', [])
+    if not follower_rows or any(type(row.get('followers_count')) is not int or row['followers_count'] < 0 for row in follower_rows):
+        raise ValueError('Invalid follower totals')
+    followers = pd.DataFrame(follower_rows)
+    followers['date'] = pd.to_datetime(followers.date, format='%Y-%m-%d', errors='raise').dt.tz_localize('Asia/Seoul')
+    if followers.date.duplicated().any():
+        raise ValueError('Duplicate follower dates')
+    followers = followers.set_index('date').sort_index()
+    follower_start, follower_end = followers.index.min(), followers.index.max()
+    followers = followers.reindex(pd.date_range(min(dates.min(), follower_start), max(dates.max(), follower_end), freq='D'))
+    # A difference needs two adjacent known calendar-day totals. Never bridge gaps.
+    followers['net_change'] = followers.followers_count.diff()
     groups = clean.groupby('media_type').agg(n=('post_id', 'size'), median_views=('views', 'median'),
                     mean_views=('views', 'mean'), median_rate=('interaction_rate_pct', 'median'))
     images = ROOT / 'images'
@@ -63,20 +78,23 @@ def main():
     labels = daily.index.strftime('%m-%d')
     x = np.arange(len(daily))
     fig, ax = plt.subplots(figsize=(11, 4.8), layout='constrained')
-    ax.plot(x, daily.median_views, 'o-', color='#2563eb', label='Daily cohort median')
-    ax.plot(x, daily.median_views_ma3, 's-', color='#ea580c', label='3-calendar-day moving average')
-    ax.set(yscale='log', ylabel='Cumulative views per post (log scale)', xlabel='Posting date (KST)',
-           title='Views by posting-date cohort | one collection snapshot')
-    ax.set_xticks(x[::2], labels[::2]); ax.grid(axis='y', alpha=.2); ax.legend()
-    fig.savefig(images / '01_daily_cohort_trend.png'); plt.close(fig)
+    ax.bar(x, daily.uploads, color='#2563eb')
+    ax.set(ylabel='Original posts in the API snapshot', xlabel='Posting date (KST)',
+           title=f'Daily uploads | {len(uploads)} original posts; reshares excluded')
+    ax.set_xticks(x[::2], labels[::2]); ax.set_yticks(range(0, int(daily.uploads.max())+2, 2)); ax.grid(axis='y', alpha=.2)
+    fig.savefig(images / '01_daily_uploads.png'); plt.close(fig)
     fig, ax = plt.subplots(figsize=(11, 4.8), layout='constrained')
-    changes = daily.median_views_change_pct
-    ax.bar(x, changes, color=['#2563eb' if pd.notna(v) and v >= 0 else '#dc2626' for v in changes])
+    changes = followers.net_change
+    fx = np.arange(len(followers))
+    ax.bar(fx, changes, color=['#2563eb' if pd.notna(v) and v >= 0 else '#dc2626' for v in changes])
+    missing = changes.isna()
+    for pos in fx[missing]:
+        ax.axvspan(pos-.45, pos+.45, color='#e5e7eb', alpha=.7, lw=0)
     ax.axhline(0, color='#64748b', lw=1)
-    ax.set_xticks(x[::2], labels[::2]); ax.grid(axis='y', alpha=.2)
-    ax.set(xlabel='Posting date (KST)', ylabel='Change from previous calendar day (%)',
-           title='Change in daily cohort median | not daily account view growth')
-    fig.savefig(images / '02_daily_cohort_change.png'); plt.close(fig)
+    ax.set_xticks(fx[::2], followers.index.strftime('%m-%d')[::2]); ax.grid(axis='y', alpha=.2)
+    ax.set(xlabel='Account insights date (KST) | gray = unavailable, not zero', ylabel='Net follower change (people)',
+           title=f'Daily follower net change | verified history through {follower_end:%Y-%m-%d}')
+    fig.savefig(images / '02_follower_net_change.png'); plt.close(fig)
     ranked = clean.sort_values('views', ascending=False)
     cumulative = ranked.views.cumsum() / ranked.views.sum() * 100
     fig, ax = plt.subplots(figsize=(9, 4.8), layout='constrained')
@@ -96,7 +114,8 @@ def main():
     ax.set_ylim(0, groups.median_views.max()*1.3)
     ax.set(ylabel='Median cumulative views', title='Content-type comparison | unequal age and sample size')
     fig.savefig(images / '04_media_comparison.png'); plt.close(fig)
-    daily.to_csv(results / 'daily_cohorts.csv', index_label='date', encoding='utf-8-sig')
+    daily.to_csv(results / 'daily_uploads.csv', index_label='date', encoding='utf-8-sig')
+    followers.to_csv(results / 'follower_daily.csv', index_label='date', encoding='utf-8-sig')
     groups.to_csv(results / 'media_summary.csv', encoding='utf-8-sig')
     clean.to_csv(results / 'cleaned_posts.csv', index=False, encoding='utf-8-sig')
     q1, q3 = clean.views.quantile([.25, .75])
@@ -107,6 +126,11 @@ def main():
                'view_total':int(clean.views.sum()), 'view_median':float(clean.views.median()),
                'top1_share_pct':float(cumulative.iloc[0]), 'top5_share_pct':float(cumulative.iloc[min(4,len(clean)-1)]),
                'iqr_upper':float(upper), 'iqr_high_count':int((clean.views > upper).sum()),
+               'original_uploads':len(uploads),
+               'follower_history_start':follower_start.date().isoformat(),
+               'follower_history_end':follower_end.date().isoformat(),
+               'follower_history_observed_at':history.get('observed_at'),
+               'follower_daily_changes':int(followers.net_change.notna().sum()),
                'valid_sample_requirement_met':len(clean)>=100}
     (results / 'quality_summary.json').write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding='utf-8')
     quality_rows = '\n'.join(f'| `{c}` | {int(raw[c].isna().sum())} |' for c in required)
@@ -114,7 +138,9 @@ def main():
     media_observation = '; '.join(f'{k} {int(v.n)}개: {v.median_views:,.0f}회' for k,v in groups.iterrows())
     nonempty = changes.dropna()
     max_day = nonempty.idxmax().strftime('%m-%d') if len(nonempty) else '산출 불가'
-    max_change = f'{nonempty.max():,.1f}%' if len(nonempty) else '산출 불가'
+    max_change = f'{nonempty.max():,.0f}명' if len(nonempty) else '산출 불가'
+    first_followers = int(followers.loc[follower_start, 'followers_count'])
+    last_followers = int(followers.loc[follower_end, 'followers_count'])
     incomplete = d.loc[~valid]
     incomplete_types = incomplete.media_type.value_counts().to_dict()
     comparison_text = ''
@@ -145,13 +171,13 @@ def main():
     report = f'''# Threads Insight M1-1 분석 리포트
 
 ## 1. 분석 주제 및 선정 이유
-Threads 게시 날짜별 성과 패턴과 콘텐츠 유형별 차이를 분석한다. 관심 있는 실제 게시물 데이터로 조회수의 집중도와 반응 특성을 확인하고 다음 콘텐츠 실험의 근거를 마련한다.
+Threads의 업로드 활동, 날짜별 팔로워 순증감, 조회수 집중도와 콘텐츠 유형별 성과를 분석한다. SNS 콘텐츠별 확산과 반응 차이를 살펴보기 위해 게시물 1개를 관측 단위로 정했다. SNS의 빠른 확산과 관심 변화는 주제 선정의 이유이며, 게시 후 경과 시간의 영향은 별도 한계로 고려한다.
 
 **갱신일: {d.collected_at.max():%Y-%m-%d}, 진행 상태: {'유효 표본 100개 요건 충족' if len(clean)>=100 else '필수 표본 요건 미충족'}.** 전체 {len(d)}개, 유효 인사이트 {len(clean)}개다. 데이터 포인트는 성과 지표가 완전한 고유 게시물 1개로 정의한다. {'추가 표본 확보 요건을 충족했다.' if len(clean)>=100 else f'현재 최소 {100-len(clean)}개의 유효 게시물을 추가 확보해야 한다.'} 시각화용 일별 집계의 관측 수와 고유 게시물 수는 구분한다.
 
 ## 2. 분석 질문
-1. 게시 날짜별 조회수 중앙값은 어떻게 변하며, 3일 이동평균에서 어떤 패턴이 보이는가?
-2. 인접한 게시 날짜 집단 사이에서 조회수 중앙값의 변화가 큰 구간은 언제인가?
+1. 날짜별로 직접 업로드한 게시물 수는 얼마이며, 업로드가 많은 날은 언제인가?
+2. 날짜별 팔로워 순증감은 얼마이며, 증가가 가장 큰 날은 언제인가?
 3. 전체 조회수는 소수 게시물에 얼마나 집중되어 있는가?
 4. 텍스트·이미지·캐러셀의 조회수와 상호작용률은 어떻게 다른가?
 
@@ -164,37 +190,39 @@ Threads 게시 날짜별 성과 패턴과 콘텐츠 유형별 차이를 분석�
 - 중복 ID 없음. 값이 있는 성과 지표의 비수치·음수·소수 없음. 게시·수집 시각 파싱 및 선후 관계 확인.
 - 성과 분석은 `status=success`이고 5개 지표가 모두 있는 {len(clean)}개만 사용한다. 결측 지표를 0으로 대체하지 않는다.
 - ID는 문자열로 읽어 17자리 숫자의 정밀도 손실을 방지한다.
+- 팔로워 자료는 별도 `data/follower_history.json`의 계정 인사이트 화면에서 확인한 날짜별 총 팔로워 수다. 관측 날짜는 {follower_start:%Y-%m-%d}~{follower_end:%Y-%m-%d}, 화면 확인 시각은 {history.get('observed_at')}다. 게시물 성과 CSV와 출처·기간이 다르며, 10월 24일의 최신 팔로워 이력으로 간주하지 않는다.
 
 | 컬럼 | 결측 수 |
 |---|---:|
 {quality_rows}
 
-현재 성과 분석에서 제외한 행은 {len(incomplete)}개이며 유형별 건수는 {incomplete_types}다. 상태별 전체 건수는 {d.status.value_counts().to_dict()}다. 유형별 미제공 여부는 추가 확인이 필요하다. 날짜가 없는 구간도 실제 미게시인지 수집 누락인지 확인되지 않았으므로 0으로 채우지 않고 결측 구간으로 표시한다. 첫날·마지막 날은 완전한 일 단위 수집 범위가 아닐 수 있어 경계일로 표시한다.
+현재 성과 분석에서 제외한 행은 {len(incomplete)}개이며 유형별 건수는 {incomplete_types}다. 상태별 전체 건수는 {d.status.value_counts().to_dict()}다. 유형별 미제공 여부는 추가 확인이 필요하다. 업로드 수는 인사이트 성공 여부와 관계없이 `REPOST_FACADE`를 제외한 원본 게시물 목록으로 집계했다. 목록에 게시물이 없는 날짜는 '이번 API 반환 목록 기준 0개'로 표시한다. 삭제·비공개 게시물 또는 API 미반환 이력까지 포함한 실제 과거 게시 수를 보장하지 않는다. 팔로워 자료의 누락 날짜와 차이를 계산할 수 없는 날짜는 0으로 채우지 않는다. 첫날·마지막 날은 완전한 일 단위 수집 범위가 아닐 수 있어 경계일로 표시한다.
 
 조회수 IQR 상한은 {upper:,.1f}회이며 초과 게시물은 {int((clean.views>upper).sum())}개다. 실제 확산 가능성이 있어 제거하거나 상한으로 치환하지 않았다. 재게시·인용은 0이 많아 IQR=0일 수 있으므로 이 기준으로 양수 값을 일괄 제거하지 않는다.
 
 ## 4. 시계열 분석 방법
-이번 데이터는 **게시 날짜가 다른 게시물의 누적 성과를 한 번 수집한 스냅샷**이다. 시간 축은 게시일이며 실제 일별 신규 조회수나 같은 게시물의 성장 곡선이 아니다. 원본 {len(d)}행을 {len(d)}일의 일별 시계열로 간주하지 않는다.
+게시물 성과는 **서로 다른 게시물의 누적 성과를 한 번 수집한 스냅샷**이며, 계정의 일별 신규 조회수가 아니다. 반면 팔로워 이력은 계정의 날짜별 총수로, 전일 대비 차이를 계산할 수 있다. 서로 다른 관측 단위와 기간을 구분하며, 원본 {len(d)}행을 {len(d)}일의 일별 시계열로 간주하지 않는다.
 
-KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일 범위에서 일별 게시 집단의 차이를 확인하기 위한 선택이다. 유효 게시물이 있는 날짜는 {int(daily.posts.notna().sum())}일이다. 주별·월별 집계로는 비교 구간이 너무 적다.
+KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일 범위에서 업로드 활동과 팔로워 변화를 날짜별로 살펴보기 위한 선택이다. 직접 업로드한 게시물이 있는 날짜는 {int(daily.uploads.gt(0).sum())}일이다. 주별·월별 집계로는 비교 구간이 너무 적다.
 
-1. **일별 구간 통계:** 게시 날짜별 게시물 수와 누적 조회수 중앙값을 계산한다. 극단값의 영향을 줄이기 위해 중앙값을 대표 지표로 사용한다.
-2. **3일 이동평균:** 일별 중앙값에 연속 3개 달력일의 산술평균을 적용한다. 3일 중 값이 하나라도 없으면 계산하지 않아 누락 구간을 건너 연결하지 않는다.
-3. **일별 변화율:** `(당일 중앙값 / 전일 중앙값 - 1) × 100`을 계산한다. 전일이 없으면 결측으로 남긴다. 이는 서로 다른 게시 집단 사이의 변화율이다.
+1. **날짜별 구간 집계:** 게시 시각을 KST 날짜로 변환하고 날짜별 직접 업로드 건수를 센다. 재게시 파사드는 제외한다. 이는 업로드 활동량을 보여주며 조회수의 높고 낮음을 뜻하지 않는다.
+2. **1차 차분:** `당일 총 팔로워 수 - 전일 총 팔로워 수`를 계산한다. 단위는 명이며 백분율 변화율이 아니다. 양수는 순증가, 음수는 순감소다. 전일 값이 없으면 계산하지 않으며 여러 날을 건너뛴 차이를 일일 증감으로 표시하지 않는다.
+
+팔로워 순증감은 신규 팔로우와 언팔로우의 순효과이며 각각의 건수를 분리하지 못한다. 날짜별 총수 집계가 수정되면 차이에도 영향을 줄 수 있다. 업로드와 팔로워의 공통 관측 기간에서 추가 비교할 수 있으나, 게시물이 팔로워 증가를 유발했다고 단정하지 않는다.
 
 트렌드는 시간에 따른 지속적인 방향성, 계절성은 일정 주기로 반복되는 패턴, 노이즈는 개별 게시물이나 관측 조건에 따른 불규칙 변동이다. 이 표본에서는 짧은 기간과 서로 다른 게시 경과 시간 때문에 장기 트렌드나 주간 계절성을 확정하지 않는다. 게시 후 경과 시간은 약 {clean.age_hours.min():.1f}~{clean.age_hours.max():.1f}시간이다.
 
 ## 5. 분석 결과 및 시각화
 
-### 5.1 게시 날짜별 성과와 이동평균
-![게시 날짜별 조회수 중앙값과 3일 이동평균](images/01_daily_cohort_trend.png)
+### 5.1 날짜별 업로드 게시물 수
+![날짜별 직접 업로드 게시물 수](images/01_daily_uploads.png)
 
-파란 선은 게시 날짜 집단의 누적 조회수 중앙값, 주황 선은 3일 이동평균이다. 결측 날짜는 선을 끊고, 값 범위 차이를 보기 위해 조회수 축에 로그 스케일을 적용했다. 선의 변화에는 콘텐츠 구성과 게시 경과 시간 차이가 섞여 있다.
+현재 API 목록의 직접 업로드 게시물은 총 {len(uploads)}개다. 가장 많이 업로드한 날은 {daily.uploads.idxmax():%m월 %d일}의 {int(daily.uploads.max())}개이며, 동률인 날짜가 있으면 첫 날짜를 표시한다. 마지막 수집일은 하루 전체가 끝나기 전이라 일일 최종 건수가 아니다.
 
-### 5.2 인접 날짜 집단 간 변화율
-![게시 날짜별 중앙값 변화율](images/02_daily_cohort_change.png)
+### 5.2 날짜별 팔로워 순증감
+![날짜별 팔로워 순증감. 회색은 미확인 구간](images/02_follower_net_change.png)
 
-인접 날짜의 중앙값 변화율이다. 집계 가능한 구간 중 가장 큰 증가율은 {max_day}의 {max_change}다. 이전 날짜 중앙값이 낮으면 변화율이 크게 보일 수 있다. 실제 계정의 일별 조회수 증가율로 해석하지 않는다.
+확인된 총 팔로워 수는 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로, 두 시점 사이 {last_followers-first_followers:+d}명 변했다. 계산 가능한 일일 순증감은 {len(nonempty)}개다. 최대 순증가는 {max_day}의 {max_change}다. 첫 날짜는 전일 기준값이 없어 증감을 계산하지 않는다. {follower_end:%m월 %d일} 이후의 회색 구간은 미수집이며 0명을 뜻하지 않는다. 팔로워 이력은 별도 화면에서 확인한 값이며 게시물의 팔로우 유입 수를 합산한 값이 아니다.
 
 ### 5.3 조회수 집중도
 ![상위 게시물 조회수 집중도](images/03_view_concentration.png)
@@ -214,12 +242,13 @@ KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일
 
 1. **조회수가 소수 게시물에 집중된다.** 관찰: 그래프 3에서 상위 5개가 전체 조회수의 {cumulative.iloc[min(4,len(clean)-1)]:.1f}%다. 해석: 일부 확산 사례가 전체 평균을 끌어올릴 가능성이 크다. 행동: 성과 기준은 중앙값과 집중도를 함께 보고, 상위 사례의 본문·주제를 별도로 검토한다.
 2. **콘텐츠 유형의 조회수 중앙값에 차이가 있다.** 관찰: 그래프 4와 표의 유형별 중앙값·표본 수는 {media_observation}다. 해석: 유형 차이 외에 주제와 게시 경과 시간의 영향일 수 있다. 행동: 같은 주제·비슷한 관측 시간을 맞춘 후 유형 차이를 재검토한다.
-3. **날짜별 차이를 시간에 따른 성장으로 단정할 수 없다.** 관찰: 그래프 2에서 가장 큰 증가율은 {max_day}의 {max_change}이고, 유효 게시물의 관측 경과 시간은 {clean.age_hours.min():.1f}~{clean.age_hours.max():.1f}시간이다. 해석: 실제 추세 외에 서로 다른 게시 집단과 누적 관측 시간이 영향을 준다. 행동: 게시 후 24시간·48시간 등 고정 시점에 추가 수집해 비교한다. 기존 게시물의 과거 24시간 값은 현재 값으로 복원하지 않는다.
+3. **확인된 기간에 계정 팔로워 수가 증가했다.** 관찰: 그래프 2에서 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로 {last_followers-first_followers:+d}명 변했고, 최대 일일 순증가는 {max_day}의 {max_change}다. 해석: 게시물 확산이나 계정 노출 등이 가능한 요인이지만 이 자료만으로 원인을 특정할 수 없다. 행동: 증가가 큰 날짜의 게시물·노출을 공통 관측 기간에서 확인하고, 이후 팔로워 이력을 추가해 비교한다.
+4. **업로드 활동이 날짜별로 고르지 않다.** 관찰: 그래프 1에서 {len(dates)}개 달력일 중 {int(daily.uploads.gt(0).sum())}일에 직접 업로드가 있으며, 최대는 하루 {int(daily.uploads.max())}개다. 해석: 활동량 차이는 계정 노출 기회의 차이와 연결될 수 있으나 성과의 인과 효과를 뜻하지 않는다. 행동: 업로드 수를 기록하면서 팔로워 이력이 있는 날짜에 한해 후속 비교한다.
 
 ## 7. 결론·한계 및 업데이트 계획
-현재 데이터로 기초 품질 점검, 시계열 기법 3가지와 시각화 4개를 수행했다. 대표 성과는 중앙값으로 보고, 확산 사례와 보통 게시물을 나누어 검토하는 것이 적절하다. {'유효 게시물 100개 이상이라는 수량 요건도 충족했다.' if len(clean)>=100 else '유효 게시물 100개 이상이라는 수량 요건은 아직 미충족이다.'}
+현재 데이터로 기초 품질 점검, 시계열 기법 2가지(날짜별 집계·1차 차분)와 시각화 4개를 수행했다. 업로드 활동과 팔로워 순증감은 별개 지표로 보고, 조회수 대표 성과는 중앙값으로 설명한다. {'유효 게시물 100개 이상이라는 수량 요건도 충족했다.' if len(clean)>=100 else '유효 게시물 100개 이상이라는 수량 요건은 아직 미충족이다.'}
 
-한계는 {len(dates)}개 달력일의 짧은 범위, 유형별 불균형, 단일 수집 스냅샷, 게시 경과 시간 차이, 외부 변수 미반영이다. 100개 게시물이 되어도 독립적인 100일 시계열이 되는 것은 아니다. 충분한 날짜 범위와 고정 관측 시점 확보가 추가로 필요하다.
+한계는 {len(dates)}개 달력일의 짧은 게시 범위, 유형별 불균형, 게시물 성과의 단일 수집 스냅샷, 게시 경과 시간 차이, 외부 변수 미반영이다. 팔로워 이력은 {follower_end:%Y-%m-%d}까지만 확인돼 게시물 자료와 종료일이 다르다. 100개 게시물이 독립적인 100일 시계열이 되는 것은 아니며, 두 지표를 비교할 때 공통 관측 날짜만 사용해야 한다.
 
 이번에는 `collect_threads.py`로 일회 수집한 뒤 고유 ID 중복과 지표 완전성을 확인하고 통계·그래프·문서를 갱신했다. 같은 게시물의 반복 측정은 신규 고유 표본으로 세지 않았다. 자동·예약 수집은 활성화하지 않았다. 현재 버전의 코드·리포트·시각화는 GitHub 저장소에 보관하며 원본 CSV는 포함하지 않는다.
 
@@ -230,13 +259,13 @@ KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일
 |---|---|---|
 | CSV 구조·결측·형식 점검 및 통계 계산 코드 작성 | 반복 점검 자동화 | 원본 {len(d)}행·고유 ID 수·유효 {len(clean)}행 대조, 지표별 비수치·음수·시간 선후 관계 확인 |
 | Threads API 일회 수집 및 갱신 | 최신 표본 확보와 수량 요건 확인 | 페이지네이션 종료 확인, 중복 ID·상태별 건수 확인, 인증 정보와 원문 CSV의 Git 제외 확인 |
-| 시계열 집계 및 시각화 코드 작성 | 집계 방식과 그래프 대안 검토 | 누락 날짜를 NA로 유지, 3일 이동평균의 최소 관측 수와 변화율의 결측 처리 확인 |
+| 날짜별 업로드 집계·팔로워 차분과 시각화 작성 | 본인이 설명할 수 있는 활동·성장 지표로 교체 | 재게시 제외 확인, 팔로워 첫날·누락 날짜의 차분을 NA로 유지, 전일 총수와 증감 대조 |
 | 인사이트 초안 및 보고서 구성 | 수치와 설명을 일관되게 정리 | 누적 스냅샷과 일별 증가량을 구분하고 관찰·해석을 분리 |
 
 위 작업은 AI 지원으로 작성했다. 작성자가 각 그래프와 수치를 이해하고 설명하는 학습 검증은 별도로 필요하며, 본 보고서는 그 검증까지 완료했다고 주장하지 않는다.
 
 ## 9. 재현 및 출처·이용 조건
-실행 방법과 라이브러리 버전은 `README.md`, `requirements.txt`를 참고한다. 본인 Threads 계정의 데이터를 Threads API로 수집했으며, 토큰 등 인증 정보는 공개하지 않는다. 게시물 원문 CSV와 행 단위 파생 데이터는 GitHub 공개 대상에서 제외한다. 과제에서 데이터 대신 수집 방법 문서를 허용하므로 README와 `collect_threads.py`에 출처·방법·범위·입력 스키마를 기록하고, 코드·집계 결과·리포트·그래프를 공개 대상으로 구성한다. 원본 비공개 상태에서 실행을 재현하려면 같은 스키마의 로컬 CSV 또는 본인 계정의 API 인증을 별도로 준비해야 한다. 데이터 재배포 라이선스는 부여하지 않는다. 수집 종료일은 {d.collected_at.max():%Y-%m-%d}로 확정했다.
+실행 방법과 라이브러리 버전은 `README.md`, `requirements.txt`를 참고한다. 본인 Threads 계정의 게시물 성과는 API, 날짜별 총 팔로워 수는 로그인된 계정 인사이트 화면의 정확한 날짜별 값으로 수집했다. 토큰 등 인증 정보는 공개하지 않는다. 게시물 원문 CSV·행 단위 파생 데이터·화면 수집 원본 JSON은 GitHub 공개 대상에서 제외한다. 과제에서 데이터 대신 수집 방법 문서를 허용하므로 README와 `collect_threads.py`에 출처·방법·범위·입력 스키마를 기록하고, 코드·집계 결과·리포트·그래프를 공개 대상으로 구성한다. 게시물 성과 수집 종료일은 {d.collected_at.max():%Y-%m-%d}, 팔로워 이력의 마지막 확인 날짜는 {follower_end:%Y-%m-%d}다. 기본 실행에는 두 종류의 로컬 입력 파일이 필요하다. 데이터 재배포 라이선스는 부여하지 않는다.
 '''
     (ROOT / 'REPORT.md').write_text(report, encoding='utf-8')
     print(json.dumps(summary, ensure_ascii=True))

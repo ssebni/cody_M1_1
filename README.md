@@ -1,6 +1,6 @@
 # Threads Insight M1-1
 
-2026년 10월 24일 Threads API로 다시 수집한 게시물 105개 중 유효 인사이트 103개를 분석했다. **필수 유효 표본 100개 요건을 충족했다.** 기존 79개에서 신규 유효 게시물 24개를 추가했다. 결과는 [REPORT.md](REPORT.md)를 참고한다.
+2026년 10월 24일 Threads API로 다시 수집한 게시물 105개 중 유효 인사이트 103개를 분석했다. **필수 유효 표본 100개 요건을 충족했다.** 기존 79개에서 신규 유효 게시물 24개를 추가했다. 그래프는 날짜별 업로드 수·팔로워 순증감·조회수 집중도·콘텐츠 유형별 비교로 구성했다. 팔로워 이력은 별도 화면 수집 자료로 10월 17일까지 확인됐다. 결과는 [REPORT.md](REPORT.md)를 참고한다.
 
 ## 실행
 
@@ -12,10 +12,10 @@ python -m pip install -r requirements.txt
 python analysis.py
 ```
 
-가상환경은 운영체제에 맞게 활성화한 후 설치·실행한다. 기본 입력은 `data/threads_insights.csv`이며 다른 입력은 다음과 같이 지정한다.
+가상환경은 운영체제에 맞게 활성화한 후 설치·실행한다. 기본 입력은 게시물 `data/threads_insights.csv`와 팔로워 이력 `data/follower_history.json` 두 개이며, 실행 전에 로컬에서 준비해야 한다. 다른 입력은 다음과 같이 지정한다.
 
 ```sh
-python analysis.py --input path/to/threads_insights.csv
+python analysis.py --input path/to/threads_insights.csv --followers path/to/follower_history.json
 ```
 
 이전 스냅샷과 비교하려면 선택적으로 다음 명령을 사용한다. 이전·현재 원본 CSV는 로컬에서 별도로 준비한다.
@@ -26,7 +26,23 @@ python analysis.py --input data/threads_insights.csv --baseline path/to/previous
 
 이번 실행은 이전 2026-10-18 스냅샷과 비교했다. 결과는 `results/snapshot_comparison.json` 및 리포트의 이전 스냅샷 비교 절에 포함했다. `--baseline`을 생략하면 현재 스냅샷 분석만 수행한다.
 
-실행하면 `images/`의 PNG 4개, `results/`의 분석 CSV·품질 JSON, `REPORT.md`를 갱신한다. 원본은 덮어쓰지 않는다. 날짜 누락은 0으로 채우지 않으며 결측 지표를 가진 게시물은 성과 분석에서 제외한다. 고유 ID가 중복되면 임의로 삭제하지 않고 실행을 중단한다.
+실행하면 `images/`의 PNG 4개, `results/`의 분석 CSV·품질 JSON, `REPORT.md`를 갱신한다. 원본은 덮어쓰지 않는다. 팔로워의 미확인 날짜는 0으로 채우지 않으며 결측 지표를 가진 게시물은 성과 분석에서 제외한다. 업로드 집계는 인사이트 상태와 무관하게 재게시 파사드를 제외한 원본 목록을 사용한다. 고유 ID가 중복되면 임의로 삭제하지 않고 실행을 중단한다.
+
+## 날짜별 팔로워 자료
+
+출처는 본인 계정의 Threads 인사이트 화면이다. 게시물 성과 API의 `likes`나 게시물별 팔로우 유입을 대신 사용하지 않는다. 날짜별 총 팔로워 수의 정확한 값을 화면 툴팁으로 확인해 저장한 이력을 사용한다. 현재 입력은 2026-10-19에 확인한 2026-10-02~2026-10-17의 16개 총수 기록이다. 전일 총수가 있어야 차이를 계산하므로 일일 순증감은 10월 3~17일의 15개다. 이후 날짜는 미수집이며 회색으로 표시한다.
+
+팔로워 입력 JSON 구조는 다음과 같다. 아래 `items`는 형식 설명을 위한 빈 배열이며 실제 실행에는 정확한 날짜별 총수 기록이 필요하다.
+
+```json
+{
+  "source": "threads_account_insights_ui",
+  "observed_at": "2026-10-19T10:41:01.728Z",
+  "items": []
+}
+```
+
+각 항목에는 `date`(YYYY-MM-DD)와 `followers_count`(0 이상의 정수)를 넣는다. 일일 순증감은 당일 총수에서 전일 총수를 뺀 값이며 신규 팔로우 수 자체가 아니다. 원본 JSON은 Git에서 제외하고 날짜별 총수·순증감 집계 CSV는 결과에 포함한다. 게시물 자료와 팔로워 자료의 관측 종료일을 구분하고, 두 지표의 관계를 해석할 때는 공통 관측 날짜만 비교한다.
 
 ## 데이터 출처와 수집 방법 기록
 
@@ -71,7 +87,7 @@ python collect_threads.py --output data/threads_insights_next.csv
 
 - [x] 분석 질문 3개 이상
 - [x] 품질 점검 및 결측·이상치 처리 기준
-- [x] 시계열 기법 2가지 이상: 일별 집계, 3일 이동평균, 일별 집단 간 변화율
+- [x] 시계열 기법 2가지: 날짜별 업로드 집계, 날짜별 팔로워 총수의 1차 차분
 - [x] 시각화 2개 이상: PNG 4개
 - [x] 그래프 근거를 포함한 인사이트 3개, 관찰과 해석 분리
 - [x] Python 코드, 실행 방법, 의존성, AI 사용 로그

@@ -37,5 +37,10 @@
   "top5_share_pct": 75.49025893536447,
   "iqr_upper": 14470.5,
   "iqr_high_count": 12,
+  "original_uploads": 103,
+  "follower_history_start": "2026-10-02",
+  "follower_history_end": "2026-10-17",
+  "follower_history_observed_at": "2026-10-19T10:41:01.728Z",
+  "follower_daily_changes": 15,
   "valid_sample_requirement_met": true
 }
