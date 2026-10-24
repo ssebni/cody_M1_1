@@ -222,7 +222,7 @@ KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일
 ### 5.2 날짜별 팔로워 순증감
 ![날짜별 팔로워 순증감. 회색은 미확인 구간](images/02_follower_net_change.png)
 
-확인된 총 팔로워 수는 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로, 두 시점 사이 {last_followers-first_followers:+d}명 변했다. 계산 가능한 일일 순증감은 {len(nonempty)}개다. 최대 순증가는 {max_day}의 {max_change}다. 첫 날짜는 전일 기준값이 없어 증감을 계산하지 않는다. {follower_end:%m월 %d일} 이후의 회색 구간은 미수집이며 0명을 뜻하지 않는다. 팔로워 이력은 별도 화면에서 확인한 값이며 게시물의 팔로우 유입 수를 합산한 값이 아니다.
+확인된 총 팔로워 수는 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로, 두 시점 사이 {last_followers-first_followers:+d}명 변했다. 계산 가능한 일일 순증감은 {len(nonempty)}개다. 최대 순증가는 {max_day}의 {max_change}이다. 첫 날짜는 전일 기준값이 없어 증감을 계산하지 않는다. {follower_end:%m월 %d일} 이후의 회색 구간은 미수집이며 0명을 뜻하지 않는다. 팔로워 이력은 별도 화면에서 확인한 값이며 게시물의 팔로우 유입 수를 합산한 값이 아니다.
 
 ### 5.3 조회수 집중도
 ![상위 게시물 조회수 집중도](images/03_view_concentration.png)
@@ -242,7 +242,7 @@ KST의 달력 날짜를 집계 단위로 사용했다. {len(dates)}개 달력일
 
 1. **조회수가 소수 게시물에 집중된다.** 관찰: 그래프 3에서 상위 5개가 전체 조회수의 {cumulative.iloc[min(4,len(clean)-1)]:.1f}%다. 해석: 일부 확산 사례가 전체 평균을 끌어올릴 가능성이 크다. 행동: 성과 기준은 중앙값과 집중도를 함께 보고, 상위 사례의 본문·주제를 별도로 검토한다.
 2. **콘텐츠 유형의 조회수 중앙값에 차이가 있다.** 관찰: 그래프 4와 표의 유형별 중앙값·표본 수는 {media_observation}다. 해석: 유형 차이 외에 주제와 게시 경과 시간의 영향일 수 있다. 행동: 같은 주제·비슷한 관측 시간을 맞춘 후 유형 차이를 재검토한다.
-3. **확인된 기간에 계정 팔로워 수가 증가했다.** 관찰: 그래프 2에서 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로 {last_followers-first_followers:+d}명 변했고, 최대 일일 순증가는 {max_day}의 {max_change}다. 해석: 게시물 확산이나 계정 노출 등이 가능한 요인이지만 이 자료만으로 원인을 특정할 수 없다. 행동: 증가가 큰 날짜의 게시물·노출을 공통 관측 기간에서 확인하고, 이후 팔로워 이력을 추가해 비교한다.
+3. **확인된 기간에 계정 팔로워 수가 증가했다.** 관찰: 그래프 2에서 {follower_start:%m월 %d일} {first_followers}명에서 {follower_end:%m월 %d일} {last_followers}명으로 {last_followers-first_followers:+d}명 변했고, 최대 일일 순증가는 {max_day}의 {max_change}이다. 해석: 게시물 확산이나 계정 노출 등이 가능한 요인이지만 이 자료만으로 원인을 특정할 수 없다. 행동: 증가가 큰 날짜의 게시물·노출을 공통 관측 기간에서 확인하고, 이후 팔로워 이력을 추가해 비교한다.
 4. **업로드 활동이 날짜별로 고르지 않다.** 관찰: 그래프 1에서 {len(dates)}개 달력일 중 {int(daily.uploads.gt(0).sum())}일에 직접 업로드가 있으며, 최대는 하루 {int(daily.uploads.max())}개다. 해석: 활동량 차이는 계정 노출 기회의 차이와 연결될 수 있으나 성과의 인과 효과를 뜻하지 않는다. 행동: 업로드 수를 기록하면서 팔로워 이력이 있는 날짜에 한해 후속 비교한다.
 
 ## 7. 결론·한계 및 업데이트 계획
